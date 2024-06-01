@@ -1,0 +1,17 @@
+[package]
+name = "hddn"
+version = "0.1.0"
+authors = ["Mitesh Singh <singhmitesh@gmail.com>"]
+edition = "2021"
+description = "A Rust library to check if a file is hidden"
+license = "MIT"
+# # repository = "https://github.com/yourusername/hddn"
+# # homepage = "https://github.com/yourusername/hddn"
+# documentation = "https://docs.rs/hddn"
+readme = "README.md"
+keywords = ["file", "hidden", "is_hidden", "attributes", "cross-platform"]
+categories = ["filesystem"]
+
+[dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+libc = "0.2"
