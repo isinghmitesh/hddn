@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ffi::CString;
 use std::io;
 
@@ -16,17 +16,17 @@ use libc::{stat, UF_HIDDEN};
 ///
 /// # Arguments
 ///
-/// * `path` - A string slice that holds the path of the file.
+/// * `path` - A reference to a `PathBuf` that holds the path of the file.
 ///
 /// # Returns
 ///
 /// * `Ok(true)` if the file is hidden.
 /// * `Ok(false)` if the file is not hidden.
 /// * `Err` if there is an error accessing the file metadata.
-pub fn is_hidden(path: &str) -> io::Result<bool> {
+pub fn is_hidden(path: &PathBuf) -> io::Result<bool> {
     #[cfg(target_os = "windows")]
     {
-        let path_c = CString::new(path)?;
+        let path_c = CString::new(path.to_str().unwrap())?;
         let attributes = unsafe { GetFileAttributesA(path_c.as_ptr()) };
         if attributes == u32::MAX {
             return Err(io::Error::last_os_error());
@@ -37,7 +37,7 @@ pub fn is_hidden(path: &str) -> io::Result<bool> {
     #[cfg(target_os = "macos")]
     {
         // Check if the file name starts with a dot
-        let file_name = Path::new(path)
+        let file_name = path
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
         if file_name.to_str().map_or(false, |s| s.starts_with('.')) {
@@ -46,7 +46,7 @@ pub fn is_hidden(path: &str) -> io::Result<bool> {
 
         // Check the UF_HIDDEN attribute
         let mut file_stat: stat = unsafe { std::mem::zeroed() };
-        let path_c = CString::new(path)?;
+        let path_c = CString::new(path.to_str().unwrap())?;
         let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
@@ -57,7 +57,7 @@ pub fn is_hidden(path: &str) -> io::Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        let file_name = Path::new(path)
+        let file_name = path
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
         return Ok(file_name.to_str().map_or(false, |s| s.starts_with('.')));
