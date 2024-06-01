@@ -6,9 +6,10 @@ A Rust library to check if a file is hidden on Windows, macOS, and Linux.
 
 Add this to your `Cargo.toml`:
 
-```toml
+```
 [dependencies]
 hddn = "0.1.0"
+```
 
 
 ## Example
