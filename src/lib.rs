@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::io;
 
 #[cfg(target_os = "windows")]
-use winapi::um::winbase::GetFileAttributesA;
+use winapi::um::fileapi::GetFileAttributesA;
 #[cfg(target_os = "windows")]
 use winapi::um::winnt::FILE_ATTRIBUTE_HIDDEN;
 
