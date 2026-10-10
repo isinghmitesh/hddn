@@ -52,9 +52,10 @@ pub fn is_hidden(path: &PathBuf) -> io::Result<bool> {
         return Ok((file_stat.st_flags & UF_HIDDEN as u32) != 0);
     }
 
+    // Linux has no hidden attribute, only the leading dot checked above.
     #[cfg(target_os = "linux")]
     {
-        // just check if the file name starts with a dot which is done above
+        return Ok(false);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
