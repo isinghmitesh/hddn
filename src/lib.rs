@@ -18,9 +18,20 @@ use std::path::{Path, PathBuf};
 /// * `Ok(false)` if the file is not hidden.
 /// * `Err` if there is an error accessing the file metadata, or if `path` has
 ///   no file name or contains a NUL character (`ErrorKind::InvalidInput`).
+///   A NUL in a parent directory counts, as does a NUL in a name that starts
+///   with a dot. That check does not read the disk.
 // Takes `&PathBuf` rather than `&Path` to keep the 0.1 signature.
 #[allow(clippy::ptr_arg)]
 pub fn is_hidden(path: &PathBuf) -> io::Result<bool> {
+    // A real directory entry cannot contain a NUL. Reject it before the
+    // dot-name return, which would otherwise report `.a\0b` or `a\0b/.hidden`
+    // as hidden. Linux has no later call that would reject it either.
+    if path_contains_nul(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL character",
+        ));
+    }
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
@@ -28,6 +39,25 @@ pub fn is_hidden(path: &PathBuf) -> io::Result<bool> {
         return Ok(true);
     }
     has_hidden_flag(path)
+}
+
+// Raw bytes on Unix, so a non-UTF-8 name still counts. UTF-16 units on
+// Windows, so an unpaired surrogate still counts.
+#[cfg(unix)]
+fn path_contains_nul(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn path_contains_nul(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().any(|unit| unit == 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn path_contains_nul(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().contains('\0')
 }
 
 // The checks below read the name as the OS stores it, so a name that isn't
@@ -55,7 +85,8 @@ fn has_hidden_flag(path: &Path) -> io::Result<bool> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    // CString::new fails on an interior NUL, which `?` turns into InvalidInput.
+    // is_hidden already rejected an interior NUL. CString::new still fails
+    // if one is present, and `?` turns that into InvalidInput.
     let path_c = CString::new(path.as_os_str().as_bytes())?;
     let mut file_stat: libc::stat = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
@@ -73,13 +104,9 @@ fn has_hidden_flag(path: &Path) -> io::Result<bool> {
 
     // The W call takes the path as UTF-16. The A call read it in the ANSI
     // code page, so any name with a non-ASCII character failed with NotFound.
+    // is_hidden already rejected an interior NUL, so the 0 below is only the
+    // terminator GetFileAttributesW requires.
     let mut path_w: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if path_w.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains a NUL character",
-        ));
-    }
     path_w.push(0);
     let attributes = unsafe { GetFileAttributesW(path_w.as_ptr()) };
     if attributes == INVALID_FILE_ATTRIBUTES {
@@ -89,6 +116,7 @@ fn has_hidden_flag(path: &Path) -> io::Result<bool> {
 }
 
 // Linux has no hidden attribute, only the leading dot checked above.
+// is_hidden rejects a NUL before this runs.
 #[cfg(target_os = "linux")]
 fn has_hidden_flag(_path: &Path) -> io::Result<bool> {
     Ok(false)
@@ -164,6 +192,26 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
+    // These names cannot exist on disk. The error comes from the path bytes,
+    // on macOS, Linux and Windows, before any metadata call.
+    #[test]
+    fn nul_in_the_name_or_a_parent_is_invalid_input() {
+        let dir = scratch_dir();
+        let paths = [
+            dir.join("a\0b"),
+            dir.join(".a\0b"),
+            dir.join("a\0b").join(".hidden"),
+        ];
+        for path in &paths {
+            let err = is_hidden(path).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::InvalidInput,
+                "expected InvalidInput for {path:?}"
+            );
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn missing_file_is_not_found() {
@@ -207,8 +255,8 @@ mod tests {
         }
 
         #[test]
-        fn interior_nul_is_invalid_input() {
-            let path = scratch_dir().join(OsStr::from_bytes(b"a\0b"));
+        fn nul_in_a_non_utf8_dot_name_is_invalid_input() {
+            let path = scratch_dir().join(OsStr::from_bytes(b".\xff\0"));
             let err = is_hidden(&path).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
@@ -234,7 +282,6 @@ mod tests {
     mod windows {
         use super::{is_hidden, scratch_dir};
         use std::fs;
-        use std::io;
         use std::path::Path;
         use std::process::Command;
 
@@ -262,12 +309,6 @@ mod tests {
             fs::write(&path, b"x").unwrap();
             attrib_hidden(&path);
             assert!(is_hidden(&path).unwrap());
-        }
-
-        #[test]
-        fn interior_nul_is_invalid_input() {
-            let err = is_hidden(&scratch_dir().join("a\0b")).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
     }
 }
