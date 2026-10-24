@@ -1,18 +1,12 @@
-use std::ffi::CString;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "windows")]
-use winapi::um::fileapi::GetFileAttributesA;
-#[cfg(target_os = "windows")]
-use winapi::um::winnt::FILE_ATTRIBUTE_HIDDEN;
-
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-use libc::{stat, UF_HIDDEN};
-#[cfg(target_os = "unix")]
-use std::os::unix::fs::MetadataExt;
-
 /// Checks if the specified file is hidden.
+///
+/// A name that starts with a dot is hidden on every platform. On macOS a file
+/// with the `UF_HIDDEN` flag (`chflags hidden`) is hidden too, and on Windows
+/// a file with `FILE_ATTRIBUTE_HIDDEN` (`attrib +h`).
 ///
 /// # Arguments
 ///
@@ -22,46 +16,87 @@ use std::os::unix::fs::MetadataExt;
 ///
 /// * `Ok(true)` if the file is hidden.
 /// * `Ok(false)` if the file is not hidden.
-/// * `Err` if there is an error accessing the file metadata.
+/// * `Err` if there is an error accessing the file metadata, or if `path` has
+///   no file name or contains a NUL character (`ErrorKind::InvalidInput`).
+// Takes `&PathBuf` rather than `&Path` to keep the 0.1 signature.
+#[allow(clippy::ptr_arg)]
 pub fn is_hidden(path: &PathBuf) -> io::Result<bool> {
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
-    if file_name.to_str().map_or(false, |s| s.starts_with('.')) {
+    if starts_with_dot(file_name) {
         return Ok(true);
     }
-    #[cfg(target_os = "windows")]
-    {
-        let path_c = CString::new(path.to_str().unwrap())?;
-        let attributes = unsafe { GetFileAttributesA(path_c.as_ptr()) };
-        if attributes == u32::MAX {
-            return Err(io::Error::last_os_error());
-        }
-        return Ok((attributes & FILE_ATTRIBUTE_HIDDEN) != 0);
-    }
+    has_hidden_flag(path)
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let mut file_stat: stat = unsafe { std::mem::zeroed() };
-        let path_c = CString::new(path.to_str().unwrap())?;
-        let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
-        }
+// The checks below read the name as the OS stores it, so a name that isn't
+// valid UTF-8 (possible on Unix) or valid UTF-16 (possible on Windows) works.
 
-        return Ok((file_stat.st_flags & UF_HIDDEN as u32) != 0);
-    }
+#[cfg(unix)]
+fn starts_with_dot(name: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    name.as_bytes().first() == Some(&b'.')
+}
 
-    // Linux has no hidden attribute, only the leading dot checked above.
-    #[cfg(target_os = "linux")]
-    {
-        return Ok(false);
-    }
+#[cfg(windows)]
+fn starts_with_dot(name: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    name.encode_wide().next() == Some(u16::from(b'.'))
+}
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        return Err(io::Error::new(io::ErrorKind::Other, "Unsupported OS"));
+#[cfg(not(any(unix, windows)))]
+fn starts_with_dot(name: &OsStr) -> bool {
+    name.to_string_lossy().starts_with('.')
+}
+
+#[cfg(target_os = "macos")]
+fn has_hidden_flag(path: &Path) -> io::Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    // CString::new fails on an interior NUL, which `?` turns into InvalidInput.
+    let path_c = CString::new(path.as_os_str().as_bytes())?;
+    let mut file_stat: libc::stat = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
     }
+    Ok((file_stat.st_flags & libc::UF_HIDDEN) != 0)
+}
+
+#[cfg(target_os = "windows")]
+fn has_hidden_flag(path: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::fileapi::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
+    use winapi::um::winnt::FILE_ATTRIBUTE_HIDDEN;
+
+    // The W call takes the path as UTF-16. The A call read it in the ANSI
+    // code page, so any name with a non-ASCII character failed with NotFound.
+    let mut path_w: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if path_w.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL character",
+        ));
+    }
+    path_w.push(0);
+    let attributes = unsafe { GetFileAttributesW(path_w.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((attributes & FILE_ATTRIBUTE_HIDDEN) != 0)
+}
+
+// Linux has no hidden attribute, only the leading dot checked above.
+#[cfg(target_os = "linux")]
+fn has_hidden_flag(_path: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn has_hidden_flag(_path: &Path) -> io::Result<bool> {
+    Err(io::Error::new(io::ErrorKind::Other, "Unsupported OS"))
 }
 
 #[cfg(test)]
